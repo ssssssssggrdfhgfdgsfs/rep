@@ -3,8 +3,6 @@ import json
 import time
 import random
 import string
-import threading
-from curl_cffi import requests as curl_requests
 from colorama import init, Fore, Style
 
 init(autoreset=True)
@@ -17,6 +15,15 @@ ROSOLVE_API_KEY = config['rosolve_api_key']
 WEBHOOK_URL = config['discord_webhook']
 PROXY_FILE = config['proxy_file']
 DELAY = config['delay_between_accounts']
+
+# Try to use curl_cffi for better impersonation, fallback to requests
+try:
+    from curl_cffi import requests as curl_requests
+    USE_CURL = True
+    print(f"{Fore.GREEN}[+] Using curl_cffi for requests")
+except ImportError:
+    USE_CURL = False
+    print(f"{Fore.YELLOW}[!] curl_cffi not available, using standard requests")
 
 # Load proxies
 proxies = []
@@ -40,6 +47,24 @@ def generate_username():
 def generate_password():
     return random_string(10) + 'A1!'
 
+def get_session():
+    """Create a session with optional impersonation and proxy"""
+    if USE_CURL:
+        # Try multiple impersonate options – the library may support 'chrome110' or just 'chrome'
+        try:
+            session = curl_requests.Session(impersonate="chrome110")
+        except:
+            try:
+                session = curl_requests.Session(impersonate="chrome")
+            except:
+                session = curl_requests.Session()
+    else:
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+    return session
+
 def solve_captcha(site_key, page_url):
     """Solve FunCaptcha using RoSolve API"""
     payload = {
@@ -52,14 +77,12 @@ def solve_captcha(site_key, page_url):
         }
     }
     
-    # Create task
     resp = requests.post("https://api.rosolve.com/createTask", json=payload)
     result = resp.json()
     if 'taskId' not in result:
         raise Exception(f"Failed to create task: {result}")
     task_id = result['taskId']
     
-    # Poll for solution
     for _ in range(30):
         time.sleep(2)
         poll = requests.post("https://api.rosolve.com/getTaskResult", json={"apiKey": ROSOLVE_API_KEY, "taskId": task_id})
@@ -69,45 +92,39 @@ def solve_captcha(site_key, page_url):
     raise Exception("CAPTCHA solving timeout")
 
 def create_account():
-    """Create a single Roblox account using direct HTTP requests"""
     username = generate_username()
     password = generate_password()
     
     # Choose random proxy if available
-    proxy = None
+    proxy_dict = None
     if proxies:
         proxy = random.choice(proxies)
         proxy_dict = {"http": proxy, "https": proxy}
-    else:
-        proxy_dict = None
     
-    session = curl_requests.Session(impersonate="chrome120")
+    session = get_session()
     if proxy_dict:
         session.proxies = proxy_dict
     
     try:
-        # Step 1: Get XSRF token and cookies
+        print(f"{Fore.CYAN}[*] Trying: {username}")
+        
+        # Step 1: Get XSRF token
         resp = session.get("https://auth.roblox.com/v2/signup")
         xsrf_token = resp.headers.get('x-csrf-token')
         if not xsrf_token:
-            raise Exception("Failed to get XSRF token")
+            raise Exception("No XSRF token")
         
-        # Step 2: Check username availability
+        # Step 2: Validate username
         check_url = f"https://auth.roblox.com/v2/usernames/validate?request.username={username}&request.birthday=2000-01-01&request.context=Signup"
         resp = session.get(check_url)
         if resp.status_code != 200:
             raise Exception("Username validation failed")
         
-        # Step 3: Get FunCaptcha public key
-        resp = session.get("https://www.roblox.com/account/signupredir")
-        # Extract site key from page (typically 476068BF-9607-4799-B53D-966BE98E2B81)
+        # Step 3: Signup with CAPTCHA
         site_key = "476068BF-9607-4799-B53D-966BE98E2B81"
-        
-        # Step 4: Solve CAPTCHA
-        print(f"{Fore.CYAN}[*] Solving CAPTCHA for {username}...")
+        print(f"{Fore.CYAN}[*] Solving CAPTCHA...")
         captcha_token = solve_captcha(site_key, "https://www.roblox.com/account/signupredir")
         
-        # Step 5: Submit signup
         signup_data = {
             "username": username,
             "password": password,
@@ -116,21 +133,17 @@ def create_account():
             "captchaToken": captcha_token,
             "captchaProvider": "PROVIDER_ARKOSE_LABS"
         }
-        headers = {
-            "X-CSRF-TOKEN": xsrf_token,
-            "Content-Type": "application/json"
-        }
+        headers = {"X-CSRF-TOKEN": xsrf_token, "Content-Type": "application/json"}
         resp = session.post("https://auth.roblox.com/v2/signup", json=signup_data, headers=headers)
         
         if resp.status_code == 200:
-            # Get .ROBLOSECURITY cookie
             cookie = None
-            for c in session.cookies:
-                if c.name == '.ROBLOSECURITY':
-                    cookie = c.value
-                    break
-            if not cookie:
-                # Try to get from response
+            if hasattr(session, 'cookies'):
+                for c in session.cookies:
+                    if c.name == '.ROBLOSECURITY':
+                        cookie = c.value
+                        break
+            if not cookie and hasattr(resp, 'cookies'):
                 cookie = resp.cookies.get('.ROBLOSECURITY')
             
             if cookie:
@@ -140,15 +153,19 @@ def create_account():
             else:
                 raise Exception("No cookie received")
         else:
-            error = resp.json() if resp.text else resp.text
-            raise Exception(f"Signup failed: {error}")
-            
+            error_text = resp.text
+            try:
+                error_json = resp.json()
+                error_text = error_json.get('errors', [{}])[0].get('message', str(error_json))
+            except:
+                pass
+            raise Exception(f"Signup failed: {error_text}")
+        
     except Exception as e:
         print(f"{Fore.RED}[FAIL] {username}: {str(e)}")
         return False
 
 def send_to_discord(username, password, cookie):
-    """Send account details to Discord webhook"""
     embed = {
         "title": "✅ New Roblox Account",
         "color": 0x57F287,
@@ -161,13 +178,13 @@ def send_to_discord(username, password, cookie):
     }
     try:
         requests.post(WEBHOOK_URL, json={"embeds": [embed]})
-        print(f"{Fore.GREEN}[+] Sent to Discord")
+        print(f"{Fore.GREEN}[+] Webhook sent")
     except Exception as e:
         print(f"{Fore.RED}[!] Webhook error: {e}")
 
 def main():
     print(f"{Fore.CYAN}{'='*50}")
-    print(f"{Fore.GREEN}Roblox Account Generator - Working Version")
+    print(f"{Fore.GREEN}Roblox Account Generator - Fixed Version")
     print(f"{Fore.CYAN}{'='*50}")
     
     consecutive_fails = 0
