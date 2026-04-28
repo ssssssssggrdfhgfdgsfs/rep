@@ -1,0 +1,7 @@
+{
+    "rosolve_api_key": "e074984cf0c115301eeaf86d7655409cc58815d1fdd85af2e6377af493eb063e",
+    "discord_webhook": "https://discord.com/api/webhooks/1498621566274109600/gYEkpZwMsV2KOy7ayjAkSUskfCBaftNdUTiMs6E2dDMPIf6J0GpklAGySgd5OKTbF8Fw",
+    "proxy_file": "proxies.txt",
+    "create_accounts": true,
+    "delay_between_accounts": 2
+}
